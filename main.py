@@ -1,104 +1,68 @@
 import os
-import logging
-from datetime import datetime
+import json
 import pytz
 import gspread
+import asyncio
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google.oauth2.service_account import Credentials
 from telegram import Bot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import asyncio
+from dotenv import load_dotenv
 
-# ===============================
-# Настройки
-# ===============================
-TOKEN = os.getenv("BOT_TOKEN")  # токен телеграм бота
-CHAT_ID = os.getenv("CHAT_ID")  # id чата/группы, куда слать
-GSHEET_ID = os.getenv("GSHEET_ID")  # id таблицы
-TARGET_GID = os.getenv("TARGET_GID")  # gid вкладки
+# Загружаем переменные окружения
+load_dotenv()
 
-# Временная зона
-TIMEZONE = pytz.timezone("Europe/Moscow")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+GSHEET_ID = os.getenv("GSHEET_ID")
+TARGET_GID = os.getenv("TARGET_GID")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-# ===============================
-# Логирование
-# ===============================
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO
+# Читаем креды из JSON-строки
+creds_dict = json.loads(GOOGLE_CREDENTIALS)
+creds = Credentials.from_service_account_info(
+    creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"]
 )
 
-# ===============================
-# Google Sheets
-# ===============================
-def get_sheet():
-    creds = Credentials.from_service_account_file(
-        "service_account.json",
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(GSHEET_ID)
+gc = gspread.authorize(creds)
+bot = Bot(token=BOT_TOKEN)
 
-    # находим вкладку по gid
-    for worksheet in spreadsheet.worksheets():
-        if str(worksheet.id) == str(TARGET_GID):
-            return worksheet
-    raise Exception("Вкладка с таким gid не найдена")
-
+# Функция получения значения из таблицы
 def get_today_value():
-    sheet = get_sheet()
-    today_str = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-    data = sheet.get_all_records()
+    sh = gc.open_by_key(GSHEET_ID)
+    ws = sh.get_worksheet_by_id(int(TARGET_GID))
 
-    for row in data:
-        if str(row.get("Дата")) == today_str:
-            return row.get("n")  # колонка n (сумма)
+    today = datetime.now(pytz.timezone("Europe/Moscow")).strftime("%d.%m.%Y")
+
+    # ищем строку по сегодняшней дате
+    col_values = ws.col_values(1)  # колонка с датами
+    for i, date in enumerate(col_values, start=1):
+        if date.strip() == today:
+            row = ws.row_values(i)
+            if len(row) > 13:  # колонка N (14-я)
+                return row[13]
     return None
 
-# ===============================
-# Отправка сообщений
-# ===============================
-async def send_message(text: str):
-    bot = Bot(token=TOKEN)
+# Сообщения
+async def send_morning():
+    text = "☀️ Всем доброго дня!) Записываемся на занятия:\nhttps://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
     await bot.send_message(chat_id=CHAT_ID, text=text)
 
-async def job_11():
+async def send_evening():
     value = get_today_value()
-    if value is not None:
-        msg = "☀️ Всем доброго дня!) Записываемся на занятия:\nhttps://docs.google.com/spreadsheets/d/{}#gid={}".format(GSHEET_ID, TARGET_GID)
-        await send_message(msg)
-        logging.info("Сообщение в 11:00 отправлено")
-    else:
-        logging.info("Сегодня занятий нет (11:00)")
+    if value:
+        text = f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
+        await bot.send_message(chat_id=CHAT_ID, text=text)
 
-async def job_18():
-    value = get_today_value()
-    if value is not None:
-        msg = f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
-        await send_message(msg)
-        logging.info("Сообщение в 18:00 отправлено")
-    else:
-        logging.info("Сегодня занятий нет (18:00)")
-
-# Автоперезапуск каждый день в 00:00
-async def restart():
-    logging.info("Перезапуск задач...")
-    scheduler.remove_all_jobs()
-    scheduler.add_job(job_11, "cron", hour=11, minute=0, timezone=TIMEZONE)
-    scheduler.add_job(job_18, "cron", hour=18, minute=0, timezone=TIMEZONE)
-    scheduler.add_job(restart, "cron", hour=0, minute=0, timezone=TIMEZONE)
-
-# ===============================
-# Основной запуск
-# ===============================
-async def main():
-    scheduler.add_job(job_11, "cron", hour=11, minute=0, timezone=TIMEZONE)
-    scheduler.add_job(job_18, "cron", hour=18, minute=0, timezone=TIMEZONE)
-    scheduler.add_job(restart, "cron", hour=0, minute=0, timezone=TIMEZONE)
+# Планировщик
+async def scheduler():
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(send_morning, "cron", hour=11, minute=0)
+    scheduler.add_job(send_evening, "cron", hour=18, minute=0)
     scheduler.start()
-    logging.info("Бот запущен и ждёт заданий...")
+
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    scheduler = AsyncIOScheduler()
-    asyncio.run(main())
+    asyncio.run(scheduler())

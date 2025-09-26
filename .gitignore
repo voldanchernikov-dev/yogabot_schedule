@@ -1,15 +1,5 @@
-# Python cache
+.env
+service_account.json
 __pycache__/
 *.pyc
-*.pyo
-
-# Virtual environments
-venv/
-.venv/
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Google API key
-service_account.json
+*.db
