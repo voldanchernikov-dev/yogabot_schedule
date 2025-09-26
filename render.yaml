@@ -1,8 +1,7 @@
 services:
   - type: web
-    name: telegram-bot
-    env: python
+    name: yogabot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
- 
