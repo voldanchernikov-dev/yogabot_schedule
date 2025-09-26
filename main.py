@@ -1,68 +1,92 @@
 import os
 import json
-import pytz
-import gspread
-import asyncio
+import logging
 from datetime import datetime
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
+
+import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Bot
-from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Загружаем переменные окружения
-load_dotenv()
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-GSHEET_ID = os.getenv("GSHEET_ID")
-TARGET_GID = os.getenv("TARGET_GID")
+# --- Конфиги ---
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-# Читаем креды из JSON-строки
-creds_dict = json.loads(GOOGLE_CREDENTIALS)
-creds = Credentials.from_service_account_info(
-    creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-
-gc = gspread.authorize(creds)
+tz = pytz.timezone("Europe/Moscow")
 bot = Bot(token=BOT_TOKEN)
 
-# Функция получения значения из таблицы
-def get_today_value():
-    sh = gc.open_by_key(GSHEET_ID)
-    ws = sh.get_worksheet_by_id(int(TARGET_GID))
+# --- Google Sheets ---
+def get_gspread_client():
+    if GOOGLE_CREDENTIALS:
+        creds_dict = json.loads(GOOGLE_CREDENTIALS)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ])
+    elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ])
+    else:
+        raise RuntimeError("Нет данных для Google API")
+    return gspread.authorize(creds)
 
-    today = datetime.now(pytz.timezone("Europe/Moscow")).strftime("%d.%m.%Y")
+def check_schedule():
+    client = get_gspread_client()
+    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-    # ищем строку по сегодняшней дате
-    col_values = ws.col_values(1)  # колонка с датами
-    for i, date in enumerate(col_values, start=1):
-        if date.strip() == today:
-            row = ws.row_values(i)
-            if len(row) > 13:  # колонка N (14-я)
-                return row[13]
+    today = datetime.now(tz).strftime("%d.%m.%Y")
+
+    dates = sheet.col_values(1)  # допустим, даты в 1-й колонке
+    values = sheet.col_values(2) # суммы в 2-й
+
+    for i, d in enumerate(dates):
+        if d.strip() == today:
+            return values[i] if i < len(values) else None
     return None
 
-# Сообщения
+# --- Задачи ---
 async def send_morning():
-    text = "☀️ Всем доброго дня!) Записываемся на занятия:\nhttps://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
-    await bot.send_message(chat_id=CHAT_ID, text=text)
+    await bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text="☀️ Всем доброго дня!) Записываемся на занятия:\n"
+             "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
+    )
 
 async def send_evening():
-    value = get_today_value()
+    value = check_schedule()
     if value:
-        text = f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
-        await bot.send_message(chat_id=CHAT_ID, text=text)
+        await bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
+        )
 
-# Планировщик
-async def scheduler():
-    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+async def restart_bot():
+    logger.info("Ровно 00:00 — перезапуск бота через exit()")
+    os._exit(0)
+
+# --- Main ---
+if __name__ == "__main__":
+    from asyncio import get_event_loop
+
+    scheduler = AsyncIOScheduler(timezone=tz)
+
+    # Cron-задачи
     scheduler.add_job(send_morning, "cron", hour=11, minute=0)
     scheduler.add_job(send_evening, "cron", hour=18, minute=0)
+    scheduler.add_job(restart_bot, "cron", hour=0, minute=0)
+
     scheduler.start()
 
-    while True:
-        await asyncio.sleep(60)
-
-if __name__ == "__main__":
-    asyncio.run(scheduler())
+    logger.info("Бот запущен и ждёт по расписанию...")
+    get_event_loop().run_forever()
