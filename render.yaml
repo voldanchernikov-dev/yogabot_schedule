@@ -1,7 +1,20 @@
 services:
-  - type: web
-    name: yogabot
-    env: docker
-    dockerfilePath: ./Dockerfile
-    autoDeploy: true
+  - type: worker
+    name: yogabot-schedule
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
     plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: SERVICE_ACCOUNT_FILE
+        sync: false
+      - key: GROUP_CHAT_ID
+        sync: false
+      - key: ADMINS
+        sync: false
