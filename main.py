@@ -7,6 +7,7 @@ import pytz
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Bot
+from telegram.ext import Application, CommandHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Логирование
@@ -16,10 +17,12 @@ logger = logging.getLogger(__name__)
 # --- Конфиги ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "0"))
 
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+
+ADMINS = os.getenv("ADMINS", "").split(",")  # список админов через запятую
 
 tz = pytz.timezone("Europe/Moscow")
 bot = Bot(token=BOT_TOKEN)
@@ -75,6 +78,15 @@ async def restart_bot():
     logger.info("Ровно 00:00 — перезапуск бота через exit()")
     os._exit(0)
 
+# --- Команды для админов ---
+async def test(update, context):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMINS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    await update.message.reply_text("✅ Тестовое сообщение отправлено.")
+    await send_evening()
+
 # --- Main ---
 if __name__ == "__main__":
     from asyncio import get_event_loop
@@ -88,5 +100,8 @@ if __name__ == "__main__":
 
     scheduler.start()
 
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("test", test))
+
     logger.info("Бот запущен и ждёт по расписанию...")
-    get_event_loop().run_forever()
+    app.run_polling()
