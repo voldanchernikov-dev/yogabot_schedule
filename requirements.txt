@@ -1,5 +1,6 @@
-python-telegram-bot==20.7
-apscheduler==3.10.4
-gspread==6.1.2
-google-auth==2.35.0
-pytz==2024.2
+python-telegram-bot==13.15
+gspread
+oauth2client
+python-dotenv
+apscheduler
+pytz

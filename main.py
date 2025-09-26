@@ -1,108 +1,160 @@
 import os
-import json
 import logging
-from datetime import datetime
-import pytz
+import sqlite3
+from datetime import datetime, timedelta
 
+from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackContext,
+    CallbackQueryHandler,
+    MessageHandler,
+    Filters,
+)
+
+# ==============================
+# ЛОГИРОВАНИЕ
+# ==============================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- Конфиги ---
+# ==============================
+# ЗАГРУЗКА .ENV
+# ==============================
+load_dotenv()
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
-# Админы
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-
-tz = pytz.timezone("Europe/Moscow")
-bot = Bot(token=BOT_TOKEN)
-
-# --- Google Sheets ---
-def get_gspread_client():
-    if GOOGLE_CREDENTIALS:
-        creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        creds = Credentials.from_service_account_info(creds_dict, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ])
-    elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ])
-    else:
-        raise RuntimeError("Нет данных для Google API")
+# ==============================
+# GOOGLE SHEETS
+# ==============================
+def get_gsheet_client():
+    creds = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
     return gspread.authorize(creds)
 
-def check_schedule():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-
-    today = datetime.now(tz).strftime("%d.%m.%Y")
-
-    dates = sheet.col_values(1)
-    values = sheet.col_values(2)
-
-    for i, d in enumerate(dates):
-        if d.strip() == today:
-            return values[i] if i < len(values) else None
-    return None
-
-# --- Задачи ---
-async def send_morning():
-    await bot.send_message(
-        chat_id=GROUP_CHAT_ID,
-        text="☀️ Всем доброго дня!) Записываемся на занятия:\n"
-             "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
+# ==============================
+# БАЗА ДАННЫХ
+# ==============================
+def init_db():
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT
+        )"""
     )
+    conn.commit()
+    conn.close()
 
-async def send_evening():
-    value = check_schedule()
-    if value:
-        await bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
-        )
+def add_user(user_id, username, first_name, last_name):
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT OR REPLACE INTO users (user_id, username, first_name, last_name)
+           VALUES (?, ?, ?, ?)""",
+        (user_id, username, first_name, last_name),
+    )
+    conn.commit()
+    conn.close()
 
-async def restart_bot():
-    logger.info("Ровно 00:00 — перезапуск бота через exit()")
+def get_user_count():
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+# ==============================
+# ОБРАБОТЧИКИ КОМАНД
+# ==============================
+def start(update: Update, context: CallbackContext):
+    user = update.effective_user
+    add_user(user.id, user.username, user.first_name, user.last_name)
+    update.message.reply_text(f"Привет, {user.first_name}! 👋 Ты зарегистрирован.")
+
+def ping(update: Update, context: CallbackContext):
+    if update.effective_user.id not in ADMINS:
+        update.message.reply_text("⛔ Доступ только для администраторов.")
+        return
+    count = get_user_count()
+    update.message.reply_text(f"✅ Бот работает. Зарегистрировано пользователей: {count}")
+
+def broadcast(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    message = " ".join(context.args)
+    if not message:
+        update.message.reply_text("❌ Укажи сообщение: /broadcast <текст>")
+        return
+    context.bot.send_message(chat_id=user_id, text=f"📢 Ваша рассылка:\n\n{message}")
+
+# ==============================
+# INLINE CALLBACKS
+# ==============================
+def button_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    query.edit_message_text(text=f"Вы нажали: {query.data}")
+
+# ==============================
+# JOBS
+# ==============================
+def send_morning(context: CallbackContext):
+    context.bot.send_message(chat_id=GROUP_CHAT_ID, text="🌅 Доброе утро!")
+
+def send_evening(context: CallbackContext):
+    context.bot.send_message(chat_id=GROUP_CHAT_ID, text="🌙 Спокойной ночи!")
+
+def restart_bot(context: CallbackContext):
+    context.bot.send_message(chat_id=GROUP_CHAT_ID, text="♻️ Бот перезапускается...")
     os._exit(0)
 
-# --- Команды ---
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
-        return
-    await update.message.reply_text("✅ Бот работает. Проверка успешна.")
-
-# --- Main ---
+# ==============================
+# ОСНОВНОЙ ЗАПУСК
+# ==============================
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    init_db()
 
-    # Регистрируем команду
-    application.add_handler(CommandHandler("ping", ping))
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    # Планировщик
-    scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(send_morning, "cron", hour=11, minute=0)
-    scheduler.add_job(send_evening, "cron", hour=18, minute=0)
-    scheduler.add_job(restart_bot, "cron", hour=0, minute=0)
+    # команды
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("ping", ping))
+    dp.add_handler(CommandHandler("broadcast", broadcast, pass_args=True))
+
+    # inline
+    dp.add_handler(CallbackQueryHandler(button_handler))
+
+    # планировщик
+    scheduler = BackgroundScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(send_morning, "cron", hour=9, minute=0, args=[dp.bot])
+    scheduler.add_job(send_evening, "cron", hour=21, minute=0, args=[dp.bot])
+    scheduler.add_job(restart_bot, "cron", hour=4, minute=0, args=[dp.bot])
     scheduler.start()
 
-    logger.info("Бот запущен и ждёт по расписанию...")
-    application.run_polling()
+    logger.info("Бот запущен...")
+    updater.start_polling()
+    updater.idle()
+
 
 if __name__ == "__main__":
     main()

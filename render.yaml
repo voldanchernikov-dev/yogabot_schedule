@@ -1,17 +1,10 @@
 services:
-  - type: worker
-    name: yoga-bot
+  - type: web
+    name: telegram-bot
     env: python
     plan: free
-    region: frankfurt
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python main.py"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: SPREADSHEET_ID
-        sync: false
-      - key: GROUP_CHAT_ID
-        sync: false
-      - key: GOOGLE_CREDENTIALS
-        sync: false
+      - key: PYTHON_VERSION
+        value: 3.9
