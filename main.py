@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import asyncio
 from datetime import datetime
 import pytz
 
@@ -23,7 +22,7 @@ GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
-# Админы (список ID через запятую в .env)
+# Админы
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 tz = pytz.timezone("Europe/Moscow")
@@ -52,8 +51,8 @@ def check_schedule():
 
     today = datetime.now(tz).strftime("%d.%m.%Y")
 
-    dates = sheet.col_values(1)  # допустим, даты в 1-й колонке
-    values = sheet.col_values(2) # суммы в 2-й
+    dates = sheet.col_values(1)
+    values = sheet.col_values(2)
 
     for i, d in enumerate(dates):
         if d.strip() == today:
@@ -86,11 +85,10 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
         return
-
     await update.message.reply_text("✅ Бот работает. Проверка успешна.")
 
 # --- Main ---
-async def main():
+def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Регистрируем команду
@@ -104,7 +102,7 @@ async def main():
     scheduler.start()
 
     logger.info("Бот запущен и ждёт по расписанию...")
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
