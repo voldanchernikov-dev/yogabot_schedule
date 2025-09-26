@@ -1,5 +1,21 @@
+# Секреты
 .env
 service_account.json
+
+# Базы данных
+*.db
+
+# Python
 __pycache__/
 *.pyc
-*.db
+*.pyo
+*.pyd
+*.pkl
+
+# IDE / редакторы
+.vscode/
+.idea/
+*.swp
+
+# Логи
+*.log
