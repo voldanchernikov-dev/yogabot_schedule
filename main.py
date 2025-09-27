@@ -1,81 +1,168 @@
+#!/usr/bin/env python3
 import os
+import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, date
 import pytz
-from dotenv import load_dotenv
+import json
+from typing import List
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import Bot, Update
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    CallbackContext,
-    Filters,
-)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ==================== Настройка логов ====================
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO
-)
+from telegram import Update, ChatType
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+# --- Config ---
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "0")) if os.getenv("GROUP_CHAT_ID") else None
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+TZ = pytz.timezone(os.getenv("TZ", "Europe/Moscow"))
+
+if not BOT_TOKEN:
+    raise SystemExit("TELEGRAM_BOT_TOKEN is not set in environment")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== Загружаем .env ====================
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-import json
-SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
-if SERVICE_ACCOUNT_JSON:
-    SERVICE_ACCOUNT_INFO = json.loads(SERVICE_ACCOUNT_JSON)
-else:
-    SERVICE_ACCOUNT_INFO = None
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
-
-if not BOT_TOKEN or not GROUP_CHAT_ID:
-    raise ValueError("❌ Переменные окружения BOT_TOKEN и GROUP_CHAT_ID обязательны")
-
-# ==================== Функции бота ====================
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ Бот запущен и работает!")
-
-def ping(update: Update, context: CallbackContext):
-    """Команда /ping доступна только админам"""
-    user_id = update.effective_user.id
-    if user_id not in ADMINS:
-        update.message.reply_text("⛔ У вас нет прав для этой команды.")
-        return
-    update.message.reply_text("🏓 Pong! Бот активен.")
-
-def send_scheduled_message(context: CallbackContext):
-    """Сообщение, отправляемое по расписанию"""
-    bot: Bot = context.bot
-    now = datetime.now(pytz.timezone("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S")
-    bot.send_message(
-        chat_id=GROUP_CHAT_ID,
-        text=f"⏰ Запланированное сообщение!\nВремя: {now}"
+# --- Google Sheets helper ---
+def open_sheet():
+    creds_info = json.loads(GOOGLE_CREDENTIALS)
+    creds = Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
+    gc = gspread.Client(auth=creds)
+    gc.session = gc.auth.authorize(creds)
 
-# ==================== Основная функция ====================
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    if SPREADSHEET_ID and "https" not in SPREADSHEET_ID:
+        sh = gc.open_by_key(SPREADSHEET_ID)
+    else:
+        sh = gc.open_by_url(SPREADSHEET_ID)
 
-    # Команды
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("ping", ping, filters=Filters.user(ADMINS)))
+    ws = sh.sheet1
+    return ws
 
-    # Планировщик
-    scheduler = BackgroundScheduler(timezone=pytz.timezone("Europe/Moscow"))
-    scheduler.add_job(send_scheduled_message, "cron", hour=17, minute=55, args=[updater.bot])
+def parse_date_from_cell(value: str):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value.strip(), fmt).date()
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(value.strip()).date()
+    except Exception:
+        return None
+
+def find_todays_items(ws) -> List[str]:
+    today = datetime.now(TZ).date()
+    records = ws.get_all_records()
+    results = []
+    for row in records:
+        keys = {k.strip().lower(): k for k in row.keys()}
+        d_key = keys.get("d")
+        n_key = keys.get("n")
+        if not d_key or not n_key:
+            continue
+        d_val = row.get(d_key)
+        n_val = row.get(n_key)
+        parsed = None
+        if isinstance(d_val, str):
+            parsed = parse_date_from_cell(d_val)
+        elif isinstance(d_val, (int, float)):
+            try:
+                parsed = date.fromordinal(date(1900, 1, 1).toordinal() + int(d_val) - 2)
+            except Exception:
+                parsed = None
+        if parsed == today and n_val:
+            results.append(str(n_val))
+    return results
+
+# --- Bot handlers ---
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    if not user_id or user_id not in ADMINS:
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    sched = context.bot_data.get("scheduler_info", {})
+    msg = "✅ Бот живой.\n"
+    if sched:
+        next_runs = sched.get("next_runs", [])
+        if next_runs:
+            msg += "Следующие запланированные отправки:\n"
+            for nr in next_runs:
+                msg += f" - {nr}\n"
+    await update.message.reply_text(msg)
+
+async def send_group_notification(app, dry=False):
+    if not GROUP_CHAT_ID:
+        logger.warning("GROUP_CHAT_ID not set; skipping notification")
+        return
+    try:
+        ws = open_sheet()
+        items = find_todays_items(ws)
+        if not items:
+            logger.info("No items for today; nothing to send.")
+            return
+        text = "📣 Сегодня есть занятия:\n" + "\n".join(f"- {it}" for it in items)
+        if dry:
+            logger.info("Dry run message:\n%s", text)
+            return
+        await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+        logger.info("Sent notification to %s", GROUP_CHAT_ID)
+    except Exception as e:
+        logger.exception("Failed to send notification: %s", e)
+
+# --- Scheduler jobs ---
+def schedule_jobs(scheduler: AsyncIOScheduler, app):
+    tz = TZ
+
+    scheduler.add_job(send_group_notification, "cron", hour=11, minute=0, timezone=tz, args=[app], id="notify_11")
+    scheduler.add_job(send_group_notification, "cron", hour=18, minute=0, timezone=tz, args=[app], id="notify_18")
+
+    def restart_now():
+        logger.info("Restart at midnight triggered.")
+        os._exit(0)
+
+    scheduler.add_job(restart_now, "cron", hour=0, minute=0, timezone=tz, id="restart_midnight")
+
+# --- App startup ---
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.bot_data["scheduler_info"] = {"next_runs": []}
+    app.add_handler(CommandHandler("ping", ping_command))
+
+    scheduler = AsyncIOScheduler()
+    schedule_jobs(scheduler, app)
     scheduler.start()
 
-    # Запуск
-    logger.info("🚀 Бот запущен...")
-    updater.start_polling()
-    updater.idle()
+    next_runs = []
+    for job in scheduler.get_jobs():
+        if job.next_run_time:
+            next_runs.append(job.next_run_time.astimezone(TZ).strftime("%Y-%m-%d %H:%M %Z"))
+    app.bot_data["scheduler_info"]["next_runs"] = next_runs
+
+    logger.info("Starting bot polling...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        logger.info("Shutting down...")
+        await app.updater.stop_polling()
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
