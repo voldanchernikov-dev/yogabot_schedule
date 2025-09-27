@@ -86,12 +86,16 @@ def find_todays_items(ws) -> List[str]:
 
 # --- Bot handlers ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Только для личных чатов
     if update.effective_chat.type != ChatType.PRIVATE:
         return
+
+    # Только для админов
     user_id = update.effective_user.id if update.effective_user else None
     if not user_id or user_id not in ADMINS:
-        await update.message.reply_text("Доступ запрещён.")
-        return
+        return  # тихо игнорируем
+
+    # Ответ только админу
     sched = context.bot_data.get("scheduler_info", {})
     msg = "✅ Бот живой.\n"
     if sched:
@@ -100,9 +104,33 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "Следующие запланированные отправки:\n"
             for nr in next_runs:
                 msg += f" - {nr}\n"
+
+    # Проверяем сегодняшние значения n
+    try:
+        ws = open_sheet()
+        items = find_todays_items(ws)
+        if items:
+            msg += "\nСегодняшние значения n:\n"
+            msg += "\n".join(f"- {x}" for x in items)
+
+            # --- Предпросмотр сообщений ---
+            morning_text = (
+                "☀️ Всем доброго дня!) Записываемся на занятия:\n"
+                "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
+            )
+            evening_text = f"Подводим итоги — по {', '.join(items)} р. Приносите наличными до конца недели."
+
+            msg += "\n\n📋 Предпросмотр сообщений на сегодня:\n"
+            msg += f"Утро (11:00):\n{morning_text}\n\n"
+            msg += f"Вечер (18:00):\n{evening_text}"
+        else:
+            msg += "\nСегодня занятий нет."
+    except Exception as e:
+        msg += f"\n⚠️ Ошибка при проверке таблицы: {e}"
+
     await update.message.reply_text(msg)
 
-async def send_group_notification(app, dry=False):
+async def send_group_notification(app, mode="morning", dry=False):
     if not GROUP_CHAT_ID:
         logger.warning("GROUP_CHAT_ID not set; skipping notification")
         return
@@ -112,12 +140,22 @@ async def send_group_notification(app, dry=False):
         if not items:
             logger.info("No items for today; nothing to send.")
             return
-        text = "📣 Сегодня есть занятия:\n" + "\n".join(f"- {it}" for it in items)
+
+        if mode == "morning":
+            text = (
+                "☀️ Всем доброго дня!) Записываемся на занятия:\n"
+                "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
+            )
+        elif mode == "evening":
+            text = f"Подводим итоги — по {', '.join(items)} р. Приносите наличными до конца недели."
+        else:
+            return
+
         if dry:
             logger.info("Dry run message:\n%s", text)
             return
         await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
-        logger.info("Sent notification to %s", GROUP_CHAT_ID)
+        logger.info("Sent notification (%s) to %s", mode, GROUP_CHAT_ID)
     except Exception as e:
         logger.exception("Failed to send notification: %s", e)
 
@@ -125,8 +163,8 @@ async def send_group_notification(app, dry=False):
 def schedule_jobs(scheduler: AsyncIOScheduler, app):
     tz = TZ
 
-    scheduler.add_job(send_group_notification, "cron", hour=11, minute=0, timezone=tz, args=[app], id="notify_11")
-    scheduler.add_job(send_group_notification, "cron", hour=18, minute=0, timezone=tz, args=[app], id="notify_18")
+    scheduler.add_job(send_group_notification, "cron", hour=11, minute=0, timezone=tz, args=[app, "morning"], id="notify_11")
+    scheduler.add_job(send_group_notification, "cron", hour=18, minute=0, timezone=tz, args=[app, "evening"], id="notify_18")
 
     def restart_now():
         logger.info("Restart at midnight triggered.")
