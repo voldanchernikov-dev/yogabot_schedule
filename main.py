@@ -66,12 +66,21 @@ def find_todays_items(ws) -> List[str]:
     results = []
     for row in records:
         keys = {k.strip().lower(): k for k in row.keys()}
-        d_key = keys.get("d")
-        n_key = keys.get("n")
+
+        d_key = None
+        n_key = None
+        for k in keys:
+            if "дата" in k or k.startswith("c"):
+                d_key = keys[k]
+            if "стоимость" in k or "итоговая" in k or k.startswith("n"):
+                n_key = keys[k]
+
         if not d_key or not n_key:
             continue
+
         d_val = row.get(d_key)
         n_val = row.get(n_key)
+
         parsed = None
         if isinstance(d_val, str):
             parsed = parse_date_from_cell(d_val)
@@ -80,22 +89,19 @@ def find_todays_items(ws) -> List[str]:
                 parsed = date.fromordinal(date(1900, 1, 1).toordinal() + int(d_val) - 2)
             except Exception:
                 parsed = None
+
         if parsed == today and n_val:
             results.append(str(n_val))
     return results
 
 # --- Bot handlers ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Только для личных чатов
+    # работает только в личке и только у админов
     if update.effective_chat.type != ChatType.PRIVATE:
         return
-
-    # Только для админов
     user_id = update.effective_user.id if update.effective_user else None
     if not user_id or user_id not in ADMINS:
-        return  # тихо игнорируем
-
-    # Ответ только админу
+        return
     sched = context.bot_data.get("scheduler_info", {})
     msg = "✅ Бот живой.\n"
     if sched:
@@ -104,67 +110,45 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "Следующие запланированные отправки:\n"
             for nr in next_runs:
                 msg += f" - {nr}\n"
-
-    # Проверяем сегодняшние значения n
-    try:
-        ws = open_sheet()
-        items = find_todays_items(ws)
-        if items:
-            msg += "\nСегодняшние значения n:\n"
-            msg += "\n".join(f"- {x}" for x in items)
-
-            # --- Предпросмотр сообщений ---
-            morning_text = (
-                "☀️ Всем доброго дня!) Записываемся на занятия:\n"
-                "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
-            )
-            evening_text = f"Подводим итоги — по {', '.join(items)} р. Приносите наличными до конца недели."
-
-            msg += "\n\n📋 Предпросмотр сообщений на сегодня:\n"
-            msg += f"Утро (11:00):\n{morning_text}\n\n"
-            msg += f"Вечер (18:00):\n{evening_text}"
-        else:
-            msg += "\nСегодня занятий нет."
-    except Exception as e:
-        msg += f"\n⚠️ Ошибка при проверке таблицы: {e}"
-
     await update.message.reply_text(msg)
 
-async def send_group_notification(app, mode="morning", dry=False):
+async def send_morning_message(app, dry=False):
     if not GROUP_CHAT_ID:
-        logger.warning("GROUP_CHAT_ID not set; skipping notification")
+        logger.warning("GROUP_CHAT_ID not set; skipping morning message")
+        return
+    text = "☀️ Всем доброго дня!) Записываемся на занятия:\nhttps://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
+    if dry:
+        logger.info("Dry run morning message:\n%s", text)
+        return
+    await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+    logger.info("Sent morning message")
+
+async def send_evening_message(app, dry=False):
+    if not GROUP_CHAT_ID:
+        logger.warning("GROUP_CHAT_ID not set; skipping evening message")
         return
     try:
         ws = open_sheet()
         items = find_todays_items(ws)
         if not items:
-            logger.info("No items for today; nothing to send.")
+            logger.info("No items for today; evening message skipped.")
             return
-
-        if mode == "morning":
-            text = (
-                "☀️ Всем доброго дня!) Записываемся на занятия:\n"
-                "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
-            )
-        elif mode == "evening":
-            text = f"Подводим итоги — по {', '.join(items)} р. Приносите наличными до конца недели."
-        else:
-            return
-
-        if dry:
-            logger.info("Dry run message:\n%s", text)
-            return
-        await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
-        logger.info("Sent notification (%s) to %s", mode, GROUP_CHAT_ID)
+        for it in items:
+            text = f"Подводим итоги — по {it}р. Приносите наличными до конца недели."
+            if dry:
+                logger.info("Dry run evening message:\n%s", text)
+                continue
+            await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+            logger.info("Sent evening message with value %s", it)
     except Exception as e:
-        logger.exception("Failed to send notification: %s", e)
+        logger.exception("Failed to send evening message: %s", e)
 
 # --- Scheduler jobs ---
 def schedule_jobs(scheduler: AsyncIOScheduler, app):
     tz = TZ
 
-    scheduler.add_job(send_group_notification, "cron", hour=11, minute=0, timezone=tz, args=[app, "morning"], id="notify_11")
-    scheduler.add_job(send_group_notification, "cron", hour=18, minute=0, timezone=tz, args=[app, "evening"], id="notify_18")
+    scheduler.add_job(send_morning_message, "cron", hour=12, minute=52, timezone=tz, args=[app], id="notify_11")
+    scheduler.add_job(send_evening_message, "cron", hour=12, minute=53, timezone=tz, args=[app], id="notify_18")
 
     def restart_now():
         logger.info("Restart at midnight triggered.")
