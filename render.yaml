@@ -2,17 +2,15 @@ services:
   - type: worker
     name: yogabot-schedule
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    plan: free
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.13.4
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         sync: false
       - key: SPREADSHEET_ID
         sync: false
-      - key: SERVICE_ACCOUNT_FILE
+      - key: SERVICE_ACCOUNT_JSON
         sync: false
       - key: GROUP_CHAT_ID
         sync: false

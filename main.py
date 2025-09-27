@@ -1,99 +1,79 @@
 import os
-import json
 import logging
 from datetime import datetime
 import pytz
+from dotenv import load_dotenv
 
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
 from apscheduler.schedulers.background import BackgroundScheduler
+from telegram import Bot, Update
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackContext,
+    Filters,
+)
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+# ==================== Настройка логов ====================
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- Конфиги ---
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# ==================== Загружаем .env ====================
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+import json
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
+if SERVICE_ACCOUNT_JSON:
+    SERVICE_ACCOUNT_INFO = json.loads(SERVICE_ACCOUNT_JSON)
+else:
+    SERVICE_ACCOUNT_INFO = None
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
+ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
 
-SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+if not BOT_TOKEN or not GROUP_CHAT_ID:
+    raise ValueError("❌ Переменные окружения BOT_TOKEN и GROUP_CHAT_ID обязательны")
 
-tz = pytz.timezone("Europe/Moscow")
-bot = Bot(token=BOT_TOKEN)
+# ==================== Функции бота ====================
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("✅ Бот запущен и работает!")
 
-# --- Google Sheets ---
-def get_gspread_client():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    if GOOGLE_CREDENTIALS:
-        creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
-        creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
-    else:
-        raise RuntimeError("Нет данных для Google API")
-    return gspread.authorize(creds)
-
-def check_schedule():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-
-    today = datetime.now(tz).strftime("%d.%m.%Y")
-    dates = sheet.col_values(1)  # даты в колонке 1
-    values = sheet.col_values(2) # суммы в колонке 2
-
-    for i, d in enumerate(dates):
-        if d.strip() == today:
-            return values[i] if i < len(values) else None
-    return None
-
-# --- Задачи ---
-def send_morning():
-    bot.send_message(
-        chat_id=GROUP_CHAT_ID,
-        text="☀️ Всем доброго дня!) Записываемся на занятия:\n"
-             "https://docs.google.com/spreadsheets/d/1Z39dIQrgdhSoWdD5AE9jIMtfn1ahTxl-femjqxyER0Q/edit#gid=1614712337"
-    )
-
-def send_evening():
-    value = check_schedule()
-    if value:
-        bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=f"Подводим итоги — по {value} р. Приносите наличными до конца недели."
-        )
-
-def restart_bot():
-    logger.info("Ровно 00:00 — перезапуск бота через exit()")
-    os._exit(0)
-
-# --- Команды ---
 def ping(update: Update, context: CallbackContext):
+    """Команда /ping доступна только админам"""
     user_id = update.effective_user.id
     if user_id not in ADMINS:
-        update.message.reply_text("⛔ У вас нет доступа")
+        update.message.reply_text("⛔ У вас нет прав для этой команды.")
         return
-    update.message.reply_text("✅ Бот работает и задачи активны")
+    update.message.reply_text("🏓 Pong! Бот активен.")
 
-# --- Main ---
+def send_scheduled_message(context: CallbackContext):
+    """Сообщение, отправляемое по расписанию"""
+    bot: Bot = context.bot
+    now = datetime.now(pytz.timezone("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S")
+    bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text=f"⏰ Запланированное сообщение!\nВремя: {now}"
+    )
+
+# ==================== Основная функция ====================
 def main():
-    updater = Updater(token=BOT_TOKEN, use_context=True)
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    dp.add_handler(CommandHandler("ping", ping))
+    # Команды
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("ping", ping, filters=Filters.user(ADMINS)))
 
     # Планировщик
-    scheduler = BackgroundScheduler(timezone=tz)
-    scheduler.add_job(send_morning, "cron", hour=11, minute=0)
-    scheduler.add_job(send_evening, "cron", hour=18, minute=0)
-    scheduler.add_job(restart_bot, "cron", hour=0, minute=0)
+    scheduler = BackgroundScheduler(timezone=pytz.timezone("Europe/Moscow"))
+    scheduler.add_job(send_scheduled_message, "cron", hour=17, minute=55, args=[updater.bot])
     scheduler.start()
 
-    logger.info("Бот запущен и ждёт по расписанию...")
+    # Запуск
+    logger.info("🚀 Бот запущен...")
     updater.start_polling()
     updater.idle()
 
