@@ -9,7 +9,8 @@ from typing import List
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from telegram import Update, ChatType
+from telegram import Update
+from telegram.constants import ChatType
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 import gspread
